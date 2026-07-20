@@ -10,6 +10,7 @@ import pytest
 from gmail_mcp.gmail import (
     ParsedMessage,
     build_mime_message,
+    build_reply_fields,
     extract_body_and_attachments,
     format_message_summary,
     format_parsed_message,
@@ -401,3 +402,75 @@ def test_build_mime_html_subtype():
     raw = build_mime_message(to="b@c.com", subject="Hi", body="<b>hi</b>", html=True)
     msg = message_from_bytes(base64.urlsafe_b64decode(raw))
     assert msg.get_content_type() == "text/html"
+
+
+# --- reply fields -----------------------------------------------------------
+
+def _original(**overrides) -> dict[str, str]:
+    headers = {
+        "from": "Praxis <praxis@example.com>",
+        "to": "me@example.com, third@x.com",
+        "subject": "Terminanfrage",
+        "message-id": "<orig@mail>",
+    }
+    headers.update(overrides)
+    return headers
+
+
+def test_build_reply_fields_basic():
+    fields = build_reply_fields(_original(), "me@example.com")
+    assert fields["to"] == "Praxis <praxis@example.com>"
+    assert fields["subject"] == "Re: Terminanfrage"
+    assert fields["in_reply_to"] == "<orig@mail>"
+    assert fields["references"] == "<orig@mail>"
+    assert "cc" not in fields
+
+
+def test_build_reply_fields_prefers_reply_to_header():
+    fields = build_reply_fields(
+        _original(**{"reply-to": "rezeption@example.com"}), "me@example.com"
+    )
+    assert fields["to"] == "rezeption@example.com"
+
+
+def test_build_reply_fields_keeps_single_re_prefix():
+    fields = build_reply_fields(_original(subject="RE: Terminanfrage"), "me@example.com")
+    assert fields["subject"] == "RE: Terminanfrage"
+
+
+def test_build_reply_fields_appends_to_references_chain():
+    fields = build_reply_fields(
+        _original(references="<a@mail> <b@mail>"), "me@example.com"
+    )
+    assert fields["references"] == "<a@mail> <b@mail> <orig@mail>"
+
+
+def test_build_reply_fields_reply_all_drops_self_and_sender():
+    fields = build_reply_fields(
+        _original(cc="praxis@example.com, fourth@y.com"),
+        "me@example.com",
+        reply_all=True,
+    )
+    assert "third@x.com" in fields["cc"]
+    assert "fourth@y.com" in fields["cc"]
+    assert "me@example.com" not in fields["cc"]
+    assert "praxis@example.com" not in fields["cc"]
+
+
+def test_build_reply_fields_reply_all_dedupes_and_honours_multi_reply_to():
+    fields = build_reply_fields(
+        _original(
+            **{"reply-to": "praxis@example.com, second@example.com"},
+            cc="third@x.com, second@example.com",
+        ),
+        "me@example.com",
+        reply_all=True,
+    )
+    assert fields["cc"] == "third@x.com"
+
+
+def test_build_reply_fields_without_message_id_omits_threading_headers():
+    fields = build_reply_fields(_original(**{"message-id": ""}), "me@example.com")
+    assert "in_reply_to" not in fields
+    assert "references" not in fields
+    assert fields["subject"] == "Re: Terminanfrage"

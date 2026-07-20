@@ -7,6 +7,7 @@ mimics the chained-builder API (users().messages().list().execute()).
 from __future__ import annotations
 
 import base64
+from email import message_from_bytes
 
 import pytest
 
@@ -87,6 +88,9 @@ class FakeMessages:
                 "id": kw["id"], "threadId": "t1", "snippet": "snip",
                 "payload": {"headers": [
                     {"name": "From", "value": "a@b.com"},
+                    {"name": "To", "value": "a@example.com, third@x.com"},
+                    {"name": "Message-ID", "value": "<orig@mail>"},
+                    {"name": "References", "value": "<older@mail>"},
                     {"name": "Subject", "value": f"subj-{kw['id']}"},
                 ]},
             })
@@ -175,6 +179,18 @@ class FakeSettings:
         return FakeFilters(self.r)
 
 
+class FakeDrafts:
+    def __init__(self, recorder):
+        self.r = recorder
+
+    def create(self, **kw):
+        self.r["draft_create"] = kw
+        return FakeExec({"id": "d1"})
+
+    def list(self, **kw):
+        return FakeExec({"drafts": [{"id": "d1", "message": {"id": "m1"}}]})
+
+
 class FakeUsers:
     def __init__(self, recorder):
         self.r = recorder
@@ -190,6 +206,9 @@ class FakeUsers:
 
     def settings(self):
         return FakeSettings(self.r)
+
+    def drafts(self):
+        return FakeDrafts(self.r)
 
 
 class FakeService:
@@ -418,3 +437,64 @@ def test_delete_filter_dispatch(fake_service):
 
 def test_unknown_tool():
     assert "Unknown tool" in server._dispatch("bogus", {})
+
+
+# --- create_draft dispatch --------------------------------------------------
+
+def _drafted_message(fake_service):
+    body = fake_service.recorder["draft_create"]["body"]["message"]
+    return body, message_from_bytes(base64.urlsafe_b64decode(body["raw"]))
+
+
+def test_create_draft_standalone(fake_service):
+    out = server._dispatch("create_draft", {
+        "account": "a@example.com", "to": "b@c.com",
+        "subject": "Hi", "body": "text",
+    })
+    assert out == "Created draft d1."
+    message, mime = _drafted_message(fake_service)
+    assert "threadId" not in message
+    assert mime["Subject"] == "Hi"
+    assert mime["In-Reply-To"] is None
+
+
+def test_create_draft_reply_joins_thread(fake_service):
+    out = server._dispatch("create_draft", {
+        "account": "a@example.com", "reply_to_message_id": "m1", "body": "text",
+    })
+    assert "in thread t1" in out
+    message, mime = _drafted_message(fake_service)
+    assert message["threadId"] == "t1"
+    assert mime["To"] == "a@b.com"
+    assert mime["Subject"] == "Re: subj-m1"
+    assert mime["In-Reply-To"] == "<orig@mail>"
+    assert mime["References"] == "<older@mail> <orig@mail>"
+    # The answered message is fetched by metadata only — its body is never read.
+    assert fake_service.recorder["get"][-1]["format"] == "metadata"
+
+
+def test_create_draft_reply_all_ccs_others_but_not_self(fake_service):
+    server._dispatch("create_draft", {
+        "account": "a@example.com", "reply_to_message_id": "m1",
+        "body": "text", "reply_all": True,
+    })
+    _, mime = _drafted_message(fake_service)
+    assert "third@x.com" in mime["Cc"]
+    assert "a@example.com" not in mime["Cc"]
+
+
+def test_create_draft_reply_honours_explicit_overrides(fake_service):
+    server._dispatch("create_draft", {
+        "account": "a@example.com", "reply_to_message_id": "m1",
+        "to": "someone@else.com", "subject": "Own subject", "body": "text",
+    })
+    message, mime = _drafted_message(fake_service)
+    assert message["threadId"] == "t1"
+    assert mime["To"] == "someone@else.com"
+    assert mime["Subject"] == "Own subject"
+
+
+def test_create_draft_without_recipient_is_refused(fake_service):
+    with pytest.raises(ValueError, match="needs 'to' and 'subject'"):
+        server._dispatch("create_draft", {"account": "a@example.com", "body": "text"})
+    assert "draft_create" not in fake_service.recorder

@@ -22,10 +22,12 @@ from gmail_mcp import config
 from gmail_mcp.gmail import (
     GmailAuthError,
     build_mime_message,
+    build_reply_fields,
     build_service,
     format_parsed_message,
     format_search_results,
     format_thread,
+    parse_headers,
     parse_message,
     resolve_label_ids,
 )
@@ -152,6 +154,10 @@ _MAX_BODY_PROP = {
     ),
 }
 
+# The headers a reply is derived from — fetched with format="metadata", which
+# keeps the answered message's body out of the draft path.
+_REPLY_HEADERS = ["Message-ID", "References", "Subject", "From", "Reply-To", "To", "Cc"]
+
 # Standing instruction appended to every tool that returns email content.
 # The model sees this in the tool description before it ever reads a message.
 _UNTRUSTED_NOTICE = (
@@ -236,7 +242,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_draft",
-            description="Create a draft email (not sent). Returns the draft id.",
+            description=(
+                "Create a draft email (not sent). Returns the draft id. Give "
+                "reply_to_message_id to draft a reply that sits inside the "
+                "original's thread: recipient, subject, In-Reply-To, References "
+                "and the thread id are taken from that message, so 'to' and "
+                "'subject' become optional overrides. Without it, 'to' and "
+                "'subject' are required."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -247,8 +260,23 @@ async def list_tools() -> list[Tool]:
                     "cc": {"type": "string"},
                     "bcc": {"type": "string"},
                     "html": {"type": "boolean", "default": False},
+                    "reply_to_message_id": {
+                        "type": "string",
+                        "description": (
+                            "Gmail id of the message being answered; the draft "
+                            "joins its thread."
+                        ),
+                    },
+                    "reply_all": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "With reply_to_message_id: put the original's other "
+                            "recipients in Cc."
+                        ),
+                    },
                 },
-                "required": ["account", "to", "subject", "body"],
+                "required": ["account", "body"],
             },
         ),
         Tool(
@@ -657,22 +685,54 @@ def _do_read_thread(args: dict) -> str:
 
 def _do_create_draft(args: dict) -> str:
     service = _service_for(args["account"])
+    thread_id = ""
+    reply: dict[str, str] = {}
+    if args.get("reply_to_message_id"):
+        original = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=args["reply_to_message_id"],
+                format="metadata",
+                metadataHeaders=_REPLY_HEADERS,
+            )
+            .execute()
+        )
+        thread_id = original.get("threadId", "")
+        reply = build_reply_fields(
+            parse_headers(original.get("payload", {})),
+            args["account"],
+            args.get("reply_all", False),
+        )
+
+    to = args.get("to") or reply.get("to")
+    subject = args.get("subject") or reply.get("subject")
+    if not to or not subject:
+        raise ValueError(
+            "create_draft needs 'to' and 'subject', or a reply_to_message_id "
+            "to take them from."
+        )
+
     raw = build_mime_message(
-        to=args["to"],
-        subject=args["subject"],
+        to=to,
+        subject=subject,
         body=args["body"],
         sender=args["account"],
-        cc=args.get("cc"),
+        cc=args.get("cc") or reply.get("cc"),
         bcc=args.get("bcc"),
         html=args.get("html", False),
+        in_reply_to=reply.get("in_reply_to"),
+        references=reply.get("references"),
     )
+    message: dict[str, Any] = {"raw": raw}
+    if thread_id:
+        message["threadId"] = thread_id
     draft = (
-        service.users()
-        .drafts()
-        .create(userId="me", body={"message": {"raw": raw}})
-        .execute()
+        service.users().drafts().create(userId="me", body={"message": message}).execute()
     )
-    return f"Created draft {draft.get('id')}."
+    placement = f" in thread {thread_id}" if thread_id else ""
+    return f"Created draft {draft.get('id')}{placement}."
 
 
 def _do_list_drafts(args: dict) -> str:

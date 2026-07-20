@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import getaddresses
 from html import unescape as _html_unescape
 from typing import Any
 
@@ -438,6 +439,52 @@ def format_thread(
 # ---------------------------------------------------------------------------
 # Outgoing MIME construction (pure)
 # ---------------------------------------------------------------------------
+
+def build_reply_fields(
+    headers: dict[str, str],
+    account: str,
+    reply_all: bool = False,
+) -> dict[str, str]:
+    """Derive a reply's addressing and threading fields from the original.
+
+    ``headers`` is a lowercase-keyed header dict as returned by
+    :func:`parse_headers`. The result carries the keys ``to``, ``cc``,
+    ``subject``, ``in_reply_to`` and ``references``, each present only when it
+    has a value, ready to be passed to :func:`build_mime_message`.
+
+    A mail client threads a reply on In-Reply-To/References, so both are set
+    from the original's Message-ID; Gmail additionally needs the thread id,
+    which the caller reads off the message resource.
+    """
+    fields: dict[str, str] = {}
+
+    to = headers.get("reply-to") or headers.get("from", "")
+    if to:
+        fields["to"] = to
+
+    if reply_all:
+        # Everyone the original went to, minus us and minus whoever the reply
+        # already goes to; de-duped because an address can sit in both To and Cc.
+        skip = {account.lower()} | {addr.lower() for _, addr in getaddresses([to])}
+        others = getaddresses([headers.get("to", ""), headers.get("cc", "")])
+        cc = dict.fromkeys(
+            addr for _, addr in others if addr and addr.lower() not in skip
+        )
+        if cc:
+            fields["cc"] = ", ".join(cc)
+
+    subject = headers.get("subject", "").strip()
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}" if subject else "Re:"
+    fields["subject"] = subject
+
+    message_id = headers.get("message-id", "")
+    if message_id:
+        fields["in_reply_to"] = message_id
+        fields["references"] = f"{headers.get('references', '')} {message_id}".strip()
+
+    return fields
+
 
 def build_mime_message(
     to: str,
