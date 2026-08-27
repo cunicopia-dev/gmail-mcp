@@ -3,9 +3,9 @@ name: Publish to PyPI
 # Publishes on a version tag (e.g. `git tag v0.1.1 && git push --tags`).
 # Auth is PyPI Trusted Publishing (OIDC) — no token stored anywhere.
 # One-time setup at https://pypi.org/manage/account/publishing/ :
-#   PyPI project name: knowledge-graph-rdbms
+#   PyPI project name: multi-account-gmail-mcp
 #   Owner:             cunicopia-dev
-#   Repository:        knowledge-graph-rdbms
+#   Repository:        gmail-mcp
 #   Workflow name:     publish.yml
 #   Environment:       pypi
 #

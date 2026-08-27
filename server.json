@@ -7,12 +7,12 @@
     "url": "https://github.com/cunicopia-dev/gmail-mcp",
     "source": "github"
   },
-  "version": "0.3.0",
+  "version": "0.4.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "multi-account-gmail-mcp",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "transport": {
         "type": "stdio"
       },
