@@ -159,6 +159,32 @@ tests/        — pytest; Gmail client is mocked, no live network
   caller the whole draft. `_header_safe` collapses CR/LF so a hostile or merely
   malformed reply Subject still drafts. Route every new header through it.
 
+## The live plugin runs THIS checkout
+
+kc's Gmail plugin does not install from PyPI. `claude-plugins/plugins/gmail/.mcp.json`
+points straight at `/mnt/x/code/gmail-mcp/.venv/bin/gmail-mcp`, and the package
+is installed **editable**, so the running plugin executes the source in this
+working tree.
+
+Two consequences:
+
+- Source edits are live immediately. There is no deploy step, and no way to
+  stage a change.
+- **A dependency change in `pyproject.toml` breaks the plugin until that venv
+  is upgraded.** Editable installs do not re-resolve on their own. The mcp 2.x
+  port did exactly this: `.venv` still held mcp 1.27.2, and
+  `.venv/bin/gmail-mcp` died on `ImportError: cannot import name
+  ServerRequestContext` while PyPI, CI and the tests were all green.
+
+So any time a dependency moves:
+
+```bash
+uv pip install --python .venv/bin/python --upgrade -e ".[dev]"
+.venv/bin/gmail-mcp --version     # must print, not traceback
+```
+
+Green CI does not cover this. CI builds a fresh environment; the plugin does not.
+
 ## Releasing
 
 Tag-driven, no manual upload. `publish.yml` fires on `v*.*.*` and pushes to
