@@ -8,9 +8,11 @@ from email import message_from_bytes
 import pytest
 
 from gmail_mcp.gmail import (
+    Attachment,
     ParsedMessage,
     build_mime_message,
     build_reply_fields,
+    decode_b64url_bytes,
     extract_body_and_attachments,
     format_message_summary,
     format_parsed_message,
@@ -19,6 +21,8 @@ from gmail_mcp.gmail import (
     parse_headers,
     parse_message,
     resolve_label_ids,
+    sanitize_filename,
+    screen_attachment,
     strip_html,
     truncate_body,
 )
@@ -527,3 +531,225 @@ def test_build_mime_threading_headers_are_flattened():
     msg = _headers_of(raw)
     assert msg["X-Evil"] is None
     assert msg["In-Reply-To"] == "<a@mail> X-Evil: 1"
+# --- attachment bytes + inline data -----------------------------------------
+
+def test_decode_b64url_bytes_roundtrips_binary():
+    raw = b"%PDF-1.4\n\x00\x01\x02\xff\xfe binary"
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii")
+    assert decode_b64url_bytes(encoded) == raw
+
+
+def test_decode_b64url_bytes_tolerates_missing_padding():
+    raw = b"abcde"
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    assert decode_b64url_bytes(encoded) == raw
+
+
+def test_decode_b64url_bytes_empty():
+    assert decode_b64url_bytes("") == b""
+
+
+def test_small_attachment_keeps_inline_data():
+    """Gmail inlines tiny attachments in body.data with no attachmentId."""
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": _b64url("hi")}},
+            {
+                "mimeType": "text/csv",
+                "filename": "tiny.csv",
+                "body": {"size": 5, "data": _b64url("a,b,c")},
+            },
+        ],
+    }
+    _, atts = extract_body_and_attachments(payload)
+    assert len(atts) == 1
+    assert atts[0].attachment_id is None
+    assert decode_b64url_bytes(atts[0].data or "") == b"a,b,c"
+
+
+def test_external_attachment_has_no_inline_data():
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {
+                "mimeType": "application/pdf",
+                "filename": "big.pdf",
+                "body": {"attachmentId": "att-1", "size": 900000},
+            },
+        ],
+    }
+    _, atts = extract_body_and_attachments(payload)
+    assert atts[0].attachment_id == "att-1"
+    assert atts[0].data is None
+
+
+# --- filename sanitization --------------------------------------------------
+
+def test_sanitize_filename_prefixes_index():
+    assert sanitize_filename("invoice.pdf", 1) == "01-invoice.pdf"
+
+
+def test_sanitize_filename_strips_path_traversal():
+    out = sanitize_filename("../../../etc/passwd", 2)
+    assert out == "02-passwd"
+    assert "/" not in out and ".." not in out
+
+
+def test_sanitize_filename_strips_windows_separators():
+    assert sanitize_filename(r"..\..\windows\system32\evil.dll", 3) == "03-evil.dll"
+
+
+def test_sanitize_filename_replaces_unsafe_chars():
+    out = sanitize_filename("Rechnung (März) #12;rm -rf.pdf", 4)
+    assert out.startswith("04-")
+    assert all(c.isalnum() or c in "._-" for c in out)
+
+
+def test_sanitize_filename_strips_rtl_override():
+    """U+202E is used to make gnp.exe render as exe.png."""
+    out = sanitize_filename("photo‮gnp.exe", 5)
+    assert "‮" not in out
+
+
+def test_sanitize_filename_strips_leading_dots():
+    out = sanitize_filename(".bashrc", 6)
+    assert out == "06-bashrc"
+
+
+def test_sanitize_filename_empty_falls_back():
+    assert sanitize_filename("", 7) == "07-attachment"
+    assert sanitize_filename("...", 8) == "08-attachment"
+
+
+def test_sanitize_filename_caps_length_but_keeps_extension():
+    out = sanitize_filename("a" * 400 + ".pdf", 9)
+    assert len(out) <= 100
+    assert out.endswith(".pdf")
+    assert out.startswith("09-")
+
+
+# --- attachment screening ---------------------------------------------------
+
+def _att(filename, mime="application/octet-stream", size=100):
+    return Attachment(
+        filename=filename, mime_type=mime, size=size, attachment_id="a1"
+    )
+
+
+def test_screen_allows_ordinary_document():
+    verdict = screen_attachment(_att("report.pdf", "application/pdf"), [])
+    assert verdict.refused is None
+    assert verdict.warning is None
+
+
+def test_screen_refuses_when_message_is_spam():
+    verdict = screen_attachment(_att("report.pdf", "application/pdf"), ["SPAM"])
+    assert verdict.refused is not None
+    assert "spam" in verdict.refused.lower()
+
+
+def test_screen_refuses_gmail_blocked_extension():
+    verdict = screen_attachment(_att("setup.exe"), [])
+    assert verdict.refused is not None
+    assert ".exe" in verdict.refused
+
+
+def test_screen_refuses_double_extension():
+    verdict = screen_attachment(_att("invoice.pdf.exe"), [])
+    assert verdict.refused is not None
+
+
+def test_screen_refuses_disguised_inner_extension():
+    verdict = screen_attachment(_att("report.exe.pdf"), [])
+    assert verdict.refused is not None
+
+
+def test_screen_extension_check_is_case_insensitive():
+    assert screen_attachment(_att("SETUP.EXE"), []).refused is not None
+
+
+def test_screen_refuses_macro_enabled_office():
+    assert screen_attachment(_att("budget.xlsm"), []).refused is not None
+    assert screen_attachment(_att("memo.docm"), []).refused is not None
+
+
+def test_screen_allows_plain_office_documents():
+    assert screen_attachment(_att("memo.docx"), []).refused is None
+    assert screen_attachment(_att("budget.xlsx"), []).refused is None
+
+
+def test_screen_refuses_executable_mime_regardless_of_name():
+    verdict = screen_attachment(_att("harmless.txt", "application/x-msdownload"), [])
+    assert verdict.refused is not None
+
+
+def test_screen_warns_on_archive_but_allows():
+    verdict = screen_attachment(_att("docs.zip", "application/zip"), [])
+    assert verdict.refused is None
+    assert verdict.warning is not None
+
+
+def test_screen_refuses_oversized_attachment():
+    verdict = screen_attachment(_att("huge.pdf", "application/pdf", size=99), [], max_bytes=50)
+    assert verdict.refused is not None
+    assert "size" in verdict.refused.lower() or "large" in verdict.refused.lower()
+
+
+def test_screen_ignores_trailing_space_on_an_extension():
+    # "exe " is not "exe", so a padded name walked straight past the set
+    # lookup. Windows resolves the name without the space.
+    for name in ("virus.exe ", "setup.msi ", "payload.exe\t"):
+        assert screen_attachment(_att(name), []).refused is not None, name
+
+
+def test_screen_allows_a_document_named_after_a_domain():
+    # `.com` is a blocked extension and the commonest TLD. Screening every
+    # suffix meant refusing saved web pages and vendor-named invoices.
+    for name in ("www.example.com.pdf", "mail.google.com.png", "acme.com.docx"):
+        verdict = screen_attachment(_att(name), [])
+        assert verdict.refused is None, f"{name}: {verdict.refused}"
+
+
+def test_screen_still_refuses_com_in_the_final_position():
+    # The exemption is positional, not a hole: a file that actually ends in
+    # .com is a DOS executable and still dies.
+    verdict = screen_attachment(_att("invoice.pdf.com"), [])
+    assert verdict.refused is not None
+    assert ".com" in verdict.refused
+
+
+def test_screen_ambiguity_exemption_does_not_extend_to_real_executables():
+    # Only genuinely ambiguous suffixes are skipped in the interior. An
+    # interior .exe is still the double-extension trick.
+    assert screen_attachment(_att("invoice.com.exe"), []).refused is not None
+    assert screen_attachment(_att("report.exe.pdf"), []).refused is not None
+
+
+# --- attachment numbering in output -----------------------------------------
+
+def test_parsed_message_numbers_attachments_and_hides_raw_id():
+    resource = {
+        "id": "m1", "threadId": "t1",
+        "payload": {
+            "mimeType": "multipart/mixed",
+            "headers": [{"name": "Subject", "value": "S"}],
+            "parts": [
+                {"mimeType": "text/plain", "body": {"data": _b64url("hi")}},
+                {"mimeType": "image/png", "filename": "pic.png",
+                 "body": {"attachmentId": "a1", "size": 10}},
+                {"mimeType": "application/pdf", "filename": "doc.pdf",
+                 "body": {"attachmentId": "a2", "size": 20}},
+            ],
+        },
+    }
+    out = format_parsed_message(parse_message(resource))
+    assert "#1" in out and "#2" in out
+    # Raw attachment ids are attacker-adjacent noise; index is the handle.
+    assert "a1" not in out and "a2" not in out
+
+
+def test_parse_message_captures_label_ids():
+    resource = {"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "SPAM"],
+                "payload": {}}
+    assert parse_message(resource).label_ids == ["INBOX", "SPAM"]

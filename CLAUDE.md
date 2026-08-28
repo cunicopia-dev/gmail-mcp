@@ -27,8 +27,8 @@ tests/        — pytest; Gmail client is mocked, no live network
 | `server.py` | Registers MCP tools, dispatches calls, resolves `account` → service. All Gmail network I/O runs in `asyncio.to_thread` (the google client is sync). |
 | `auth.py` | `add` / `list` / `remove` subcommands. `add` runs `InstalledAppFlow.run_local_server`, reads the granted email from `users.getProfile`, upserts into the store. |
 | `store.py` | `TokenStore` CRUD over `sqlite3`. `upsert` preserves `added_at`; `touch` stamps `last_used_at`; `update_token` persists refreshed access tokens. |
-| `gmail.py` | `build_service(account, store)` builds google-auth `Credentials`, refreshes if stale, persists the new token, returns a Gmail client. Plus pure helpers — `parse_message`, `extract_body_and_attachments`, `strip_html`, `resolve_label_ids`, `build_mime_message`, formatters. |
-| `config.py` | `db_path()`, `client_secret_path()`, `SCOPES`. |
+| `gmail.py` | `build_service(account, store)` builds google-auth `Credentials`, refreshes if stale, persists the new token, returns a Gmail client. Plus pure helpers — `parse_message`, `extract_body_and_attachments`, `strip_html`, `resolve_label_ids`, `build_mime_message`, `sanitize_filename`, `screen_attachment`, `decode_b64url_bytes`, formatters. |
+| `config.py` | `db_path()`, `client_secret_path()`, `attachments_dir()`, `max_attachment_bytes()`, `SCOPES`. |
 
 ## OAuth model
 
@@ -91,6 +91,33 @@ tests/        — pytest; Gmail client is mocked, no live network
   then decodes entities via the stdlib `html.unescape` (numeric + all named).
   Entity decoding runs AFTER tag removal so a decoded `<` can't be re-parsed as
   a tag — keep that ordering if you touch it.
+- **Attachment downloads write to exactly one root.** `download_attachments`
+  is the only filesystem write in the server. It writes under
+  `config.attachments_dir()/<message_id>/` (env `GMAIL_MCP_ATTACHMENT_DIR`,
+  default `~/.gmail-mcp/attachments`) and takes **no destination argument** by
+  design: one would be an arbitrary-file-write primitive reachable by an
+  instruction embedded in an email. Do not add one. `sanitize_filename`
+  reduces the attacker-chosen filename to an inert index-prefixed ASCII
+  basename (separators dropped, leading dots stripped, bidi overrides removed,
+  length capped) and `_write_attachment` re-checks the resolved path against
+  the root, then writes `0o600` with `O_NOFOLLOW`. The message id is validated
+  against `_MESSAGE_ID_RE` before it becomes a directory name.
+- **Attachments are type-screened, not virus-scanned.** `screen_attachment`
+  refuses Gmail's own blocked-file-type list, macro-enabled Office documents,
+  executable MIME types, oversized payloads, and every attachment on a
+  `SPAM`-labeled message. It checks *all* dot-suffixes, so `invoice.pdf.exe` is
+  caught. Archives are allowed with a warning. Gmail does **not** expose its
+  malware verdict through the API and `attachments.get` will serve bytes the
+  web UI blocks, so never call this a scan in code comments, tool descriptions,
+  or docs.
+- **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
+  numbers them and deliberately omits the raw `attachmentId`; the download tool
+  takes the same ordinal. Both sides get their ordering from one payload walk
+  (`extract_body_and_attachments`), so if you change that walk, both move
+  together. Gmail inlines small attachments in `body.data` with no
+  `attachmentId`, so `Attachment.data` carries that case, and
+  `decode_b64url_bytes` (never the text decoder, which mangles binary) turns
+  either form into bytes.
 - **No audit log** — intentionally not implemented.
 
 ## Gotchas

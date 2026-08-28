@@ -7,6 +7,8 @@ Resolves the on-disk locations the server and auth CLI need:
   * The Google OAuth "Desktop app" client-secret JSON — default
     ``~/.gmail-mcp/client_secret.json``, overridable via the
     ``GMAIL_MCP_CLIENT_SECRET`` environment variable.
+  * The attachment download root, default ``~/.gmail-mcp/attachments``,
+    overridable via the ``GMAIL_MCP_ATTACHMENT_DIR`` environment variable.
 
 No secrets are hardcoded here. The client_id / client_secret are read
 from the client-secret JSON you download from the Google Cloud Console.
@@ -43,6 +45,11 @@ _DEFAULT_DIR = Path.home() / ".gmail-mcp"
 # into a full body explicitly. 0 or negative ⇒ unlimited. A caller can override
 # per-request, and re-fetch in full by passing max_body_chars=0.
 _DEFAULT_MAX_BODY_CHARS = 500
+
+# Hard ceiling on a single downloaded attachment, in bytes. Gmail's own
+# attachment limit is 25 MB, so this refuses nothing Gmail would deliver; it
+# exists so a malformed or hostile size can't be decoded into memory unbounded.
+_DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 def db_path() -> Path:
@@ -82,3 +89,35 @@ def max_body_chars() -> int:
         return int(raw)
     except ValueError:
         return _DEFAULT_MAX_BODY_CHARS
+
+
+def attachments_dir() -> Path:
+    """Root directory attachments are downloaded into.
+
+    Honors ``GMAIL_MCP_ATTACHMENT_DIR``; defaults to
+    ``~/.gmail-mcp/attachments``. Downloads are confined to a per-message
+    subdirectory of this root, and the root is the ONLY writable location the
+    server has. There is deliberately no per-call destination argument, because
+    that would be an arbitrary-file-write primitive reachable by an instruction
+    embedded in an email.
+    """
+    override = os.environ.get("GMAIL_MCP_ATTACHMENT_DIR")
+    if override:
+        return Path(override).expanduser()
+    return _DEFAULT_DIR / "attachments"
+
+
+def max_attachment_bytes() -> int:
+    """Per-attachment size ceiling in bytes.
+
+    Honors ``GMAIL_MCP_MAX_ATTACHMENT_BYTES``; defaults to 25 MB. A value <= 0
+    means unlimited. A malformed value falls back to the default rather than
+    crashing the server.
+    """
+    raw = os.environ.get("GMAIL_MCP_MAX_ATTACHMENT_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_ATTACHMENT_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_ATTACHMENT_BYTES

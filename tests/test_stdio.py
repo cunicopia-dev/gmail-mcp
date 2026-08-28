@@ -45,7 +45,13 @@ async def test_server_initializes_and_lists_its_tools(tmp_path):
         assert client.initialize_result.server_info.name == "gmail-mcp"
         names = {t.name for t in (await client.list_tools()).tools}
         # Spot-check across the surface rather than pinning the whole list.
-        assert {"list_accounts", "search_messages", "read_message", "create_draft"} <= names
+        assert {
+            "list_accounts",
+            "search_messages",
+            "read_message",
+            "create_draft",
+            "download_attachments",
+        } <= names
 
 
 async def test_hand_written_schemas_survive_the_protocol(tmp_path):
@@ -56,6 +62,12 @@ async def test_hand_written_schemas_survive_the_protocol(tmp_path):
         schema = tools["create_draft"].input_schema
         assert {"reply_to_message_id", "reply_all", "from_addr"} <= set(schema["properties"])
         assert schema["required"] == ["account", "body"]
+
+        downloads = tools["download_attachments"].input_schema
+        assert set(downloads["properties"]) == {"account", "message_id", "index"}
+        # No destination argument, and none will be added: it would be an
+        # arbitrary-file-write primitive reachable from email text.
+        assert "dest" not in str(downloads).lower()
 
 
 async def test_calls_and_failures_both_come_back_as_content(tmp_path):

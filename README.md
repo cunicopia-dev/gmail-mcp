@@ -106,6 +106,7 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | `search_messages` | `account`, `query`, `max_results=20` | Message summaries (Gmail search syntax) with ids. |
 | `read_message` | `account`, `message_id`, `format="full"`, `max_body_chars?` | Decoded headers, plaintext body (HTML stripped if needed), attachment metadata. Body capped by default; pass `max_body_chars=0` for the full body. |
 | `read_thread` | `account`, `thread_id`, `max_body_chars?` | Every message in the thread, in order. Each body capped by default; `max_body_chars=0` for full. |
+| `download_attachments` | `account`, `message_id`, `index?` | Save a message's attachments to disk and return absolute paths. Address them by the `#N` shown in `read_message`; omit `index` for all of them. Fixed download root, no destination argument. Dangerous file types and anything on a spam-labeled message are refused. |
 | `search_all_accounts` | `query`, `max_results_per_account=10` | One search across **every** account, each result tagged by account. |
 | `create_draft` | `account`, `body`, `to?`, `subject?`, `cc?`, `bcc?`, `html=false`, `reply_to_message_id?`, `reply_all=false`, `from_addr?` | A draft (not sent). Returns the draft id. With `reply_to_message_id` the draft is a reply inside that message's thread: recipient, subject, `In-Reply-To`, `References` and the thread id come from it, and `to`/`subject` become optional overrides. Without it, `to` and `subject` are required. `from_addr` sets the `From` header for a verified send-as alias; it defaults to the account address. |
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
@@ -361,6 +362,32 @@ low-stakes:
   ids exclusively in the trusted region, so an attacker can't smuggle a forged
   id into a place the agent treats as authoritative.
 
+- **Attachments land in one fixed place, and some never land at all.**
+  `download_attachments` writes only under `~/.gmail-mcp/attachments/<message_id>/`
+  (`GMAIL_MCP_ATTACHMENT_DIR`). There is deliberately no destination argument,
+  because one would be an arbitrary-file-write primitive that an instruction
+  buried in an email could aim at `~/.zshrc`. Filenames are attacker-chosen, so
+  they are reduced to inert ASCII basenames (path separators dropped, leading
+  dots stripped, bidi overrides removed, length capped, index-prefixed), and the
+  resolved path is re-checked against the root before the write. Files are
+  written owner-only, with `O_NOFOLLOW` so a pre-planted symlink can't redirect
+  them.
+
+  Screening happens before any bytes are fetched. It refuses every file type
+  [Gmail itself blocks in transit](https://support.google.com/mail/answer/6590)
+  (`.exe`, `.jar`, `.js`, `.vbs`, `.iso`, `.py`, ~50 more), macro-enabled Office
+  documents, executable MIME types, and every attachment on a message Gmail
+  labeled `SPAM`. All of a filename's dot-suffixes are checked, not just the
+  last, so `invoice.pdf.exe` is caught. Archives are saved but flagged, since
+  nothing here can look inside one.
+
+  **This is a type screen, not a virus scan.** Gmail scans attachments
+  server-side but does not expose the verdict through its API. There is no
+  malware field on the message or attachment resource, and `attachments.get`
+  will serve bytes the Gmail web UI refuses to let you download. A clean verdict
+  here means "not an obvious weapon," never "scanned and safe." The saved file's
+  *contents* remain untrusted third-party data.
+
 **Known limitation.** This only governs *this* server's surface. If the same
 agent session also has a tool that can reach the open internet (web fetch, HTTP),
 that's a separate egress path `gmail-mcp` can't do anything about — pairing it
@@ -436,6 +463,8 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_DB` | `~/.gmail-mcp/tokens.db` | SQLite token store path. |
 | `GMAIL_MCP_CLIENT_SECRET` | `~/.gmail-mcp/client_secret.json` | Downloaded Google OAuth client. |
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
+| `GMAIL_MCP_ATTACHMENT_DIR` | `~/.gmail-mcp/attachments` | Download root for `download_attachments`. Files land in a per-message subdirectory. This is the only location the server writes to. |
+| `GMAIL_MCP_MAX_ATTACHMENT_BYTES` | `26214400` (25 MB) | Per-attachment size ceiling. Gmail's own limit is 25 MB, so this refuses nothing Gmail would deliver. `0` (or negative) means unlimited. |
 | `GMAIL_MCP_MAX_BODY_CHARS` | `500` | Default per-message body cap for `read_message`/`read_thread`. Deliberately tight so reads are cheap by default; `0` (or negative) means unlimited, and a per-call `max_body_chars` argument overrides it. |
 
 ---

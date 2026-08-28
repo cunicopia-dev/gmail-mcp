@@ -109,12 +109,19 @@ def _persist_creds(email: str, creds: Credentials, store: TokenStore) -> None:
 
 @dataclass
 class Attachment:
-    """Attachment metadata from a message payload."""
+    """Attachment metadata from a message payload.
+
+    Gmail returns large attachments by reference (``attachment_id``, fetched
+    separately via ``users.messages.attachments.get``) and inlines small ones
+    directly in the part body. ``data`` holds that inline base64url payload
+    when there is no ``attachment_id``; exactly one of the two is set.
+    """
 
     filename: str
     mime_type: str
     size: int
     attachment_id: str | None
+    data: str | None = None
 
 
 @dataclass
@@ -126,6 +133,7 @@ class ParsedMessage:
     headers: dict[str, str] = field(default_factory=dict)
     body: str = ""
     attachments: list[Attachment] = field(default_factory=list)
+    label_ids: list[str] = field(default_factory=list)
 
     @property
     def subject(self) -> str:
@@ -148,13 +156,22 @@ class ParsedMessage:
         return self.body
 
 
+def decode_b64url_bytes(data: str) -> bytes:
+    """Decode Gmail's URL-safe base64 payload to raw bytes.
+
+    Gmail omits base64 padding, so it is restored here. Use this (never the
+    text decoder) for attachments: a PDF or docx run through a utf-8 decode
+    with ``errors="replace"`` comes out corrupted.
+    """
+    if not data:
+        return b""
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded.encode("utf-8"))
+
+
 def _decode_b64url(data: str) -> str:
     """Decode Gmail's URL-safe base64 body data to text."""
-    if not data:
-        return ""
-    padded = data + "=" * (-len(data) % 4)
-    raw = base64.urlsafe_b64decode(padded.encode("utf-8"))
-    return raw.decode("utf-8", errors="replace")
+    return decode_b64url_bytes(data).decode("utf-8", errors="replace")
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -218,12 +235,15 @@ def extract_body_and_attachments(
         sub_parts = part.get("parts", []) or []
 
         if filename:
+            attachment_id = body.get("attachmentId")
             attachments.append(
                 Attachment(
                     filename=filename,
                     mime_type=mime,
                     size=int(body.get("size", 0) or 0),
-                    attachment_id=body.get("attachmentId"),
+                    attachment_id=attachment_id,
+                    # Small attachments arrive inline instead of by reference.
+                    data=None if attachment_id else body.get("data"),
                 )
             )
         elif mime == "text/plain" and body.get("data"):
@@ -255,6 +275,7 @@ def parse_message(resource: dict[str, Any]) -> ParsedMessage:
         headers=parse_headers(payload),
         body=body,
         attachments=attachments,
+        label_ids=list(resource.get("labelIds", []) or []),
     )
 
 
@@ -288,6 +309,201 @@ def resolve_label_ids(
                 f"Unknown label {value!r}. Available labels: {available}"
             )
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Attachment safety (pure)
+# ---------------------------------------------------------------------------
+#
+# Two independent problems, both rooted in the same fact: an attachment's
+# filename, MIME type, and bytes are all chosen by whoever sent the mail.
+#
+# 1. WHERE IT LANDS. ``sanitize_filename`` reduces a filename to an inert
+#    ASCII basename so it can never escape the download directory, shadow a
+#    dotfile, or spoof its own extension with a bidi override.
+# 2. WHETHER IT LANDS AT ALL. ``screen_attachment`` refuses types Gmail itself
+#    blocks in transit, plus macro-enabled Office documents.
+#
+# What this is NOT: an antivirus scan. Gmail scans attachments server-side but
+# does not expose the verdict through the API. There is no malware field on
+# the message or attachment resource, and ``attachments.get`` will happily
+# serve bytes the Gmail web UI refuses to download. The only Gmail verdict
+# visible here is the SPAM label on the parent message, which is why a spam
+# message's attachments are refused wholesale. Everything else below is a
+# conservative type screen. A clean verdict means "not an obvious weapon",
+# never "scanned and safe".
+
+# Gmail's published blocked-file-type list (support.google.com/mail/answer/6590).
+# Gmail rejects these in transit, so one arriving at all is anomalous.
+_BLOCKED_EXTENSIONS = frozenset({
+    "ade", "adp", "apk", "appx", "appxbundle", "bat", "cab", "chm", "cmd",
+    "com", "cpl", "diagcab", "diagcfg", "diagpack", "dll", "dmg", "ex",
+    "ex_", "exe", "hta", "img", "ins", "iso", "isp", "jar", "jnlp", "js",
+    "jse", "lib", "lnk", "mde", "mjs", "msc", "msi", "msix", "msixbundle",
+    "msp", "mst", "nsh", "pif", "ps1", "ps1xml", "ps2", "ps2xml", "psc1",
+    "psc2", "py", "pyc", "pyo", "pyw", "pyz", "pyzw", "reg", "scr", "sct",
+    "shb", "sys", "vb", "vbe", "vbs", "vhd", "vxd", "wsc", "wsf", "wsh",
+    "xll"
+})
+
+# Office formats that can carry auto-executing VBA macros.
+_MACRO_EXTENSIONS = frozenset({
+    "docm", "dotm", "xlsm", "xltm", "xlam", "pptm", "potm", "ppam", "ppsm",
+    "sldm"
+})
+
+# Executable content types, checked independently of the filename so a
+# renamed binary is still caught.
+_BLOCKED_MIME_TYPES = frozenset(
+    {
+        "application/x-msdownload",
+        "application/x-msdos-program",
+        "application/x-dosexec",
+        "application/vnd.microsoft.portable-executable",
+        "application/x-executable",
+        "application/x-mach-binary",
+        "application/x-sh",
+        "application/x-shellscript",
+        "application/x-csh",
+        "application/java-archive",
+        "application/vnd.android.package-archive",
+        "application/x-apple-diskimage",
+        "application/x-ms-shortcut",
+    }
+)
+
+# Blocked extensions that are also ordinary words in a filename. Screened in
+# the final position, where they decide what the file is, and skipped in the
+# interior, where they do not.
+#
+# `.com` is the whole list, and it is here because a filename built from a
+# domain is common — `www.example.com.pdf`, `mail.google.com.png`, an invoice
+# named after the vendor. Screening every suffix meant refusing all of them.
+#
+# Position is what makes this safe. `invoice.pdf.com` still ends in `.com` and
+# is still refused. `www.example.com.pdf` ends in `.pdf`, so the OS opens it in
+# a PDF reader and the interior `com` is text, not an extension.
+_AMBIGUOUS_INTERIOR_EXTENSIONS = frozenset({"com"})
+
+# Containers whose contents nothing here can inspect. Allowed, but flagged.
+_ARCHIVE_EXTENSIONS = frozenset({
+    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "z", "lz", "lzma"
+})
+
+# Filename characters kept verbatim; everything else becomes "_".
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_MAX_FILENAME_LEN = 100
+
+
+@dataclass
+class Screening:
+    """Verdict on one attachment: refuse outright, or allow with a caveat."""
+
+    refused: str | None = None
+    warning: str | None = None
+
+
+def _extensions(filename: str) -> list[str]:
+    """Every dot-separated suffix of a filename, lowercased and stripped.
+
+    All of them, not just the last: ``invoice.pdf.exe`` is the classic
+    double-extension trick, and ``report.exe.pdf`` is the same trick run
+    backwards for a viewer that renders right-to-left.
+
+    Suffixes are stripped because whitespace is not part of an extension and
+    padding one is enough to walk past a set lookup: ``"virus.exe "`` yields
+    the suffix ``"exe "``, which is not ``"exe"``, and the whole screen opens.
+    Windows ignores a trailing space when resolving the name, so the file it
+    refused to see is the file that would have run.
+    """
+    return [part.strip().lower() for part in filename.split(".")[1:] if part.strip()]
+
+
+def sanitize_filename(filename: str, index: int) -> str:
+    """Reduce an attacker-chosen filename to an inert, index-prefixed basename.
+
+    Path components are dropped (both separators), non-ASCII and shell-special
+    characters are replaced, leading dots are stripped so the file can't shadow
+    a dotfile, and the length is capped with the extension preserved. The index
+    prefix (``01-``) keeps two attachments with the same name from colliding
+    and matches the ``#N`` handle shown by ``read_message``.
+
+    The result is deliberately boring enough to print outside the untrusted
+    fence, which is what makes the returned path safe to echo back.
+    """
+    prefix = f"{index:02d}-"
+    budget = _MAX_FILENAME_LEN - len(prefix)
+    # Take the basename under either separator before anything else.
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    base = _SAFE_FILENAME_CHARS.sub("_", base)
+    base = base.lstrip("._-")
+    if len(base) > budget:
+        stem, dot, ext = base.rpartition(".")
+        keep_ext = bool(dot) and len(ext) <= 10
+        base = stem[: budget - len(ext) - 1] + "." + ext if keep_ext else base[:budget]
+    if not base:
+        base = "attachment"
+    return prefix + base
+
+
+def screen_attachment(
+    attachment: Attachment,
+    label_ids: list[str] | None = None,
+    max_bytes: int | None = None,
+) -> Screening:
+    """Decide whether an attachment may be written to disk.
+
+    ``label_ids`` are the parent message's Gmail labels; ``SPAM`` there is
+    Gmail's own verdict on the sender and refuses the whole message's
+    attachments. See the section comment above for what this does and does
+    not guarantee.
+    """
+    if label_ids and "SPAM" in label_ids:
+        return Screening(
+            refused=(
+                "Gmail classified this message as spam; its attachments are "
+                "refused. Move the message out of Spam in Gmail if you are "
+                "certain it is legitimate."
+            )
+        )
+
+    extensions = _extensions(attachment.filename)
+    # The final suffix decides what the file is, so it is always screened.
+    # Interior suffixes are screened too — that is what catches
+    # `invoice.pdf.exe` — except for the handful that double as ordinary
+    # filename words. See _AMBIGUOUS_INTERIOR_EXTENSIONS.
+    screened = extensions[-1:] + [
+        e for e in extensions[:-1] if e not in _AMBIGUOUS_INTERIOR_EXTENSIONS
+    ]
+    blocked = next((e for e in screened if e in _BLOCKED_EXTENSIONS), None)
+    if blocked:
+        return Screening(
+            refused=(
+                f"blocked file type (.{blocked}): Gmail refuses this type "
+                "in transit and it is not safe to write to disk"
+            )
+        )
+    macro = next((e for e in screened if e in _MACRO_EXTENSIONS), None)
+    if macro:
+        return Screening(
+            refused=f"macro-enabled Office file (.{macro}): can run VBA on open"
+        )
+    if attachment.mime_type.lower() in _BLOCKED_MIME_TYPES:
+        return Screening(
+            refused=f"executable content type ({attachment.mime_type})"
+        )
+    if max_bytes is not None and 0 < max_bytes < attachment.size:
+        return Screening(
+            refused=(
+                f"size {attachment.size} bytes exceeds the "
+                f"{max_bytes}-byte limit (GMAIL_MCP_MAX_ATTACHMENT_BYTES)"
+            )
+        )
+    if any(e in _ARCHIVE_EXTENSIONS for e in extensions):
+        return Screening(
+            warning="archive: contents were not inspected, unpack with care"
+        )
+    return Screening()
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +578,13 @@ def _parsed_body(msg: ParsedMessage, max_body_chars: int | None = None) -> str:
     ]
     if msg.attachments:
         lines.append("Attachments:")
-        for att in msg.attachments:
+        for i, att in enumerate(msg.attachments, 1):
+            # Numbered, not id'd: #N is the handle download_attachments takes,
+            # and it stays stable because both sides walk the payload the same
+            # way. The raw attachmentId is long, useless to a human, and would
+            # be one more attacker-controlled string echoed back.
             lines.append(
-                f"  - {att.filename} ({att.mime_type}, {att.size} bytes, "
-                f"id={att.attachment_id})"
+                f"  #{i} {att.filename} ({att.mime_type}, {att.size} bytes)"
             )
     lines.append("")
     lines.append(truncate_body(msg.body or "(no text body)", max_body_chars))
