@@ -110,10 +110,22 @@ tests/        — pytest; Gmail client is mocked, no live network
   (sync) so this holds.
 - **Label resolution does not create labels.** `resolve_label_ids` matches
   existing ids/names (case-insensitive) and raises listing available names.
-- **The `mcp` pin is load-bearing.** `mcp>=1.0.0,<2`. Version 2.0 removed the
-  `Server.list_tools` / `Server.call_tool` decorators, so an unpinned resolve
-  picks 2.x and `server.py` raises `AttributeError` at import. The port is
-  tracked in #6; do not widen the pin without doing it.
+- **The protocol layer is two adapter functions, and that is on purpose.**
+  `list_tools()` and `call_tool()` are plain async functions returning
+  `list[Tool]` and `list[TextContent]`. `_on_list_tools` / `_on_call_tool`
+  wrap them in the `ListToolsResult` / `CallToolResult` that mcp 2.x wants,
+  and `build_app()` passes those to `Server(...)`. Keep new tool work behind
+  that seam — it is what kept the 2.x port to one file and 16 untouched
+  schemas.
+- **Tool schemas are hand-written, not derived.** `Tool(input_schema={...})`.
+  Do not switch to `MCPServer` / `@app.tool()`: those build the schema from
+  the function signature, which would regenerate all 16 and lose the wording.
+  The field is `input_schema` in 2.x; the `inputSchema` alias still constructs
+  at runtime but mypy rejects it, so use the real name.
+- **Tool errors return, they do not raise.** `call_tool` catches ValueError,
+  GmailAuthError and HttpError and returns readable text with
+  `is_error=False`. That predates the 2.x port and was preserved through it.
+  Changing it is a decision, not a refactor.
 - **Header values are flattened, not validated.** Python's compat32 policy
   *raises* `HeaderParseError` on an embedded header rather than injecting one,
   and that raise misses the `ValueError` branch in `call_tool` and costs the
@@ -166,7 +178,12 @@ This repo is public and takes PRs from strangers. Two things about that:
 
 ```bash
 pip install -e ".[dev]"
-pytest                  # unit tests, no network (Gmail client mocked)
+pytest                  # no network (Gmail client mocked; stdio tests use a scratch DB)
 ruff check src/ tests/  # lint
-mypy src/               # type check
+mypy src/               # type check — 28 pre-existing errors, mostly bare `dict`
 ```
+
+`tests/test_stdio.py` is the one that matters after any change to the protocol
+layer. Everything else calls `_dispatch` or the handlers directly, so the suite
+stays green even if the server answers nothing over the wire. Those three tests
+spawn the real process and speak MCP to it.

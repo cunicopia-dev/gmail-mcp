@@ -14,11 +14,19 @@ import logging
 from typing import Any
 
 from googleapiclient.errors import HttpError
-from mcp.server import Server
+from mcp.server import ServerRequestContext
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
-from gmail_mcp import config
+from gmail_mcp import __version__, config
 from gmail_mcp.gmail import (
     GmailAuthError,
     build_mime_message,
@@ -36,7 +44,6 @@ from gmail_mcp.store import Account, TokenStore
 logger = logging.getLogger(__name__)
 
 _store: TokenStore | None = None
-app = Server("gmail-mcp")
 
 
 def get_store() -> TokenStore:
@@ -167,7 +174,6 @@ _UNTRUSTED_NOTICE = (
 )
 
 
-@app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
         Tool(
@@ -177,7 +183,7 @@ async def list_tools() -> list[Tool]:
                 "with when each was last used. Use this to discover valid values "
                 "for the 'account' argument of every other tool."
             ),
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
         Tool(
             name="search_messages",
@@ -186,7 +192,7 @@ async def list_tools() -> list[Tool]:
                 "(e.g. 'from:alice is:unread newer_than:7d'). Returns message "
                 "summaries with ids you can pass to read_message." + _UNTRUSTED_NOTICE
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -208,7 +214,7 @@ async def list_tools() -> list[Tool]:
                 "Long bodies are truncated by default; pass max_body_chars=0 to "
                 "get the full body." + _UNTRUSTED_NOTICE
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -230,7 +236,7 @@ async def list_tools() -> list[Tool]:
                 "truncated by default; pass max_body_chars=0 for full bodies."
                 + _UNTRUSTED_NOTICE
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -250,7 +256,7 @@ async def list_tools() -> list[Tool]:
                 "'subject' become optional overrides. Without it, 'to' and "
                 "'subject' are required."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -292,7 +298,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_drafts",
             description="List draft messages in the account (returns draft ids).",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -304,7 +310,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_labels",
             description="List the account's labels (id and name).",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"account": _ACCOUNT_PROP},
                 "required": ["account"],
@@ -323,7 +329,7 @@ async def list_tools() -> list[Tool]:
                 "UNREAD, star = add STARRED, etc. To send mail to Trash use the "
                 "`trash` tool."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -364,7 +370,7 @@ async def list_tools() -> list[Tool]:
                 "Refuses an empty/absent selection so it can never trash a whole "
                 "mailbox by accident."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -389,7 +395,7 @@ async def list_tools() -> list[Tool]:
                 "tag each result with its account. The headline multi-account tool."
                 + _UNTRUSTED_NOTICE
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Gmail search query."},
@@ -406,7 +412,7 @@ async def list_tools() -> list[Tool]:
                 "actions, with label ids resolved to names. Use the id with "
                 "delete_filter."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"account": _ACCOUNT_PROP},
                 "required": ["account"],
@@ -426,7 +432,7 @@ async def list_tools() -> list[Tool]:
                 "affects mail that ARRIVES after it's created; clear existing "
                 "backlog with search + modify_labels."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -488,7 +494,7 @@ async def list_tools() -> list[Tool]:
                 "Delete a Gmail filter by id (does not touch mail it already "
                 "acted on). Get ids from list_filters."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -509,7 +515,7 @@ async def list_tools() -> list[Tool]:
                 "empty/absent selection so it can never sweep a whole mailbox. Tip: "
                 "run count_messages on the same query first to see the blast radius."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -544,7 +550,7 @@ async def list_tools() -> list[Tool]:
                 "query (capped by max_results, default 25, to keep output bounded)."
                 + _UNTRUSTED_NOTICE
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
@@ -574,7 +580,7 @@ async def list_tools() -> list[Tool]:
                 "trash. Set all_accounts=true to count across every authorized "
                 "account and get a per-account breakdown plus a total."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "account": {
@@ -598,7 +604,6 @@ async def list_tools() -> list[Tool]:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         text = await asyncio.to_thread(_dispatch, name, arguments)
@@ -1089,8 +1094,6 @@ def main() -> None:
     """Run the MCP server over stdio."""
     import argparse
 
-    from gmail_mcp import __version__
-
     parser = argparse.ArgumentParser(
         prog="gmail-mcp",
         description=(
@@ -1107,7 +1110,56 @@ def main() -> None:
     asyncio.run(_run())
 
 
+# ---------------------------------------------------------------------------
+# Protocol adapters (mcp 2.x)
+# ---------------------------------------------------------------------------
+#
+# mcp 2.0 replaced the @app.list_tools() / @app.call_tool() decorators with
+# constructor callbacks that take a request context and typed params and return
+# a typed Result. The two adapters below are that shim and nothing more.
+#
+# list_tools() and call_tool() above stay plain async functions returning
+# list[Tool] and list[TextContent]. That is deliberate: it keeps the whole tool
+# surface testable without standing up a session, and it keeps this port to the
+# protocol seam instead of letting it reach into 16 tool definitions.
+
+
+async def _on_list_tools(
+    ctx: ServerRequestContext[None, Any],
+    params: PaginatedRequestParams | None,
+) -> ListToolsResult:
+    # Every tool fits one page; there is no cursor to honor.
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(
+    ctx: ServerRequestContext[None, Any],
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    # is_error stays False even for the error branches. call_tool returns
+    # readable text for a failure ("Error: ...", "Gmail API error 404: ..."),
+    # which is what the model needs to see, and that was the behavior under
+    # mcp 1.x. Changing the error signal is a decision, not part of a port.
+    return CallToolResult(content=list(content))
+
+
+def build_app() -> Server[None]:
+    """Build the MCP server with its handlers attached.
+
+    A factory rather than a module-level singleton: the 2.x Server takes its
+    handlers in the constructor, so it cannot be created before they exist.
+    """
+    return Server(
+        "gmail-mcp",
+        version=__version__,
+        on_list_tools=_on_list_tools,
+        on_call_tool=_on_call_tool,
+    )
+
+
 async def _run() -> None:
+    app = build_app()
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

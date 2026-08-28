@@ -531,7 +531,7 @@ def test_create_draft_from_addr_overrides_sender(fake_service):
 
 def test_create_draft_schema_exposes_from_addr():
     tools = asyncio.run(server.list_tools())
-    schema = next(t.inputSchema for t in tools if t.name == "create_draft")
+    schema = next(t.input_schema for t in tools if t.name == "create_draft")
     assert "from_addr" in schema["properties"]
     # Optional either way; #2 made to/subject conditionally required instead.
     assert schema["required"] == ["account", "body"]
