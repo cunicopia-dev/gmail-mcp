@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cunicopia-dev/multi-account-gmail-mcp",
   "title": "Multi-Account Gmail",
-  "description": "Multi-account Gmail MCP server — read, search, draft, and label across every inbox.",
+  "description": "Multi-account Gmail MCP server \u2014 read, search, draft, and label across every inbox.",
   "repository": {
     "url": "https://github.com/cunicopia-dev/gmail-mcp",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "multi-account-gmail-mcp",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       },
@@ -35,6 +35,27 @@
         {
           "name": "GMAIL_MCP_OAUTH_PORT",
           "description": "Localhost port for the OAuth redirect during account authorization. Defaults to 8765.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GMAIL_MCP_ATTACHMENT_DIR",
+          "description": "Download root for download_attachments. Files land in a per-message subdirectory. This is the only location the server writes to. Defaults to ~/.gmail-mcp/attachments.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GMAIL_MCP_MAX_ATTACHMENT_BYTES",
+          "description": "Per-attachment size ceiling in bytes. Defaults to 26214400 (25 MB), which is Gmail's own limit. 0 or negative means unlimited.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GMAIL_MCP_MAX_BODY_CHARS",
+          "description": "Default cap on returned message body length. Defaults to 500. Pass max_body_chars=0 on a call for the full body.",
           "isRequired": false,
           "format": "string",
           "isSecret": false
