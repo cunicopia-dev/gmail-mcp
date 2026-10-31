@@ -111,6 +111,7 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | `create_draft` | `account`, `body`, `to?`, `subject?`, `cc?`, `bcc?`, `html=false`, `reply_to_message_id?`, `reply_all=false`, `from_addr?` | A draft (not sent). Returns the draft id. With `reply_to_message_id` the draft is a reply inside that message's thread: recipient, subject, `In-Reply-To`, `References` and the thread id come from it, and `to`/`subject` become optional overrides. Without it, `to` and `subject` are required. `from_addr` sets the `From` header for a verified send-as alias; it defaults to the account address. |
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
 | `list_labels` | `account` | The account's labels (name + id). |
+| `create_label` | `account`, `name` | Create a user label (nest with `/`). Idempotent: an existing name (case-insensitive) returns its id and creates nothing. |
 | `modify_labels` | `account`, selection (`message_id` \| `message_ids` \| `query`), `add?`, `remove?` | Add/remove labels on a **selection** (one id, a list, or everything a query matches), batched 1000/call. General mutator: archive = remove INBOX, mark-read = remove UNREAD, star = add STARRED. |
 | `trash` | `account`, selection (`message_id` \| `message_ids` \| `query`) | Move a selection to Trash (recoverable 30 days; not permanent delete). Refuses an empty selection. |
 | `bulk_action` | `account`, `action`, selection (`message_id` \| `message_ids` \| `query`) | Friendly verb layer over `modify_labels`. `action` ∈ `archive`/`unarchive`/`mark_read`/`mark_unread`/`star`/`unstar`/`spam`/`unspam`/`trash`/`untrash`. Batched 1000/call; refuses an empty selection. |
@@ -187,7 +188,7 @@ machines with no browser — see [The headless auth path](#the-headless-auth-pat
 |-------|----------------|
 | `gmail.readonly` | Read mail and metadata: search messages/threads, read bodies, list labels and drafts. Read-only — cannot modify anything. |
 | `gmail.compose` | Create, update, and manage drafts. Used only by `create_draft`. |
-| `gmail.modify` | Add/remove labels on messages. Used by `modify_labels`. |
+| `gmail.modify` | Add/remove labels on messages and create labels. Used by `modify_labels`, `bulk_action`, `trash` and `create_label`. |
 | `gmail.settings.basic` | List, create, and delete filters. Used by `list_filters`/`create_filter`/`delete_filter`. Does **not** grant forwarding-address changes (that's `gmail.settings.sharing`, not requested). |
 
 `gmail.send` is not requested. Without it the credential simply has no Gmail API

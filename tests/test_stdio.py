@@ -51,6 +51,7 @@ async def test_server_initializes_and_lists_its_tools(tmp_path):
             "read_message",
             "create_draft",
             "download_attachments",
+            "create_label",
         } <= names
 
 

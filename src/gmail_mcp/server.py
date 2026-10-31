@@ -357,6 +357,23 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="create_label",
+            description=(
+                "Create a user label so modify_labels and create_filter can use "
+                "it. Idempotent: if a label with that name already exists "
+                "(case-insensitive) its id is returned and nothing is created. "
+                "Use '/' in the name to nest, e.g. 'Mail/Newsletters'."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "name": {"type": "string", "description": "Label name."},
+                },
+                "required": ["account", "name"],
+            },
+        ),
+        Tool(
             name="modify_labels",
             description=(
                 "Add and/or remove labels on a SELECTION of messages — one id, a "
@@ -364,7 +381,8 @@ async def list_tools() -> list[Tool]:
                 "matches). One message is just a selection of size one; there is "
                 "no separate bulk vs single. Matches are modified in batches of "
                 "1000 in a single API call each. Labels accept ids or names "
-                "(resolved to existing labels; does not create new ones). This is "
+                "(resolved to existing labels; does not create new ones, use "
+                "create_label for that). This is "
                 "the general mutator: archive = remove INBOX, mark-read = remove "
                 "UNREAD, star = add STARRED, etc. To send mail to Trash use the "
                 "`trash` tool."
@@ -467,7 +485,8 @@ async def list_tools() -> list[Tool]:
                 "least one match criterion (from_address/to_address/subject/query/"
                 "has_attachment) and at least one action. Actions: convenience "
                 "flags archive/mark_read/delete/star, plus add_labels/remove_labels "
-                "for any other label (names or ids, must already exist). Filters "
+                "for any other label (names or ids, must already exist; "
+                "create_label makes one). Filters "
                 "cannot forward mail off-account by design. Note: a filter only "
                 "affects mail that ARRIVES after it's created; clear existing "
                 "backlog with search + modify_labels."
@@ -679,6 +698,8 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_list_drafts(args)
         case "list_labels":
             return _do_list_labels(args)
+        case "create_label":
+            return _do_create_label(args)
         case "modify_labels":
             return _do_modify_labels(args)
         case "trash":
@@ -970,6 +991,29 @@ def _do_list_labels(args: dict) -> str:
     for lbl in sorted(labels, key=lambda x: x["name"]):
         lines.append(f"  {lbl['name']}  (id={lbl['id']})")
     return "\n".join(lines)
+
+
+def _do_create_label(args: dict) -> str:
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise ValueError("create_label needs a non-empty name.")
+    service = _service_for(args["account"])
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    for lbl in labels:
+        if lbl["name"].lower() == name.lower():
+            return (
+                f"Label '{lbl['name']}' already exists in {args['account']} "
+                f"(id={lbl['id']}); nothing created."
+            )
+    created = service.users().labels().create(
+        userId="me",
+        body={
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        },
+    ).execute()
+    return f"Created label '{created['name']}' in {args['account']} (id={created['id']})."
 
 
 # ---------------------------------------------------------------------------
