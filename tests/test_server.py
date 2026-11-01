@@ -175,6 +175,9 @@ class FakeThreads:
 
 
 class FakeLabels:
+    def __init__(self, recorder=None):
+        self.r = recorder if recorder is not None else {}
+
     def list(self, **kw):
         return FakeExec({"labels": [
             {"id": "INBOX", "name": "INBOX"},
@@ -183,6 +186,10 @@ class FakeLabels:
             {"id": "STARRED", "name": "STARRED"},
             {"id": "Label_5", "name": "Receipts"},
         ]})
+
+    def create(self, **kw):
+        self.r["label_create"] = kw
+        return FakeExec({"id": "Label_9", "name": kw["body"]["name"]})
 
 
 class FakeFilters:
@@ -238,7 +245,7 @@ class FakeUsers:
         return FakeThreads(self.r)
 
     def labels(self):
-        return FakeLabels()
+        return FakeLabels(self.r)
 
     def drafts(self):
         return FakeDrafts(self.r)
@@ -388,6 +395,29 @@ def test_list_labels_dispatch(fake_service):
     out = server._dispatch("list_labels", {"account": "a@example.com"})
     assert "Receipts" in out
     assert "Label_5" in out
+
+
+def test_create_label_creates(fake_service):
+    out = server._dispatch("create_label", {"account": "a@example.com", "name": " Newsletters "})
+    assert "Created label 'Newsletters'" in out
+    assert "Label_9" in out
+    body = fake_service.recorder["label_create"]["body"]
+    assert body["name"] == "Newsletters"
+    assert body["labelListVisibility"] == "labelShow"
+
+
+def test_create_label_existing_is_noop(fake_service):
+    # Re-running a setup script must not fail or duplicate: match is case-insensitive.
+    out = server._dispatch("create_label", {"account": "a@example.com", "name": "receipts"})
+    assert "already exists" in out
+    assert "Label_5" in out
+    assert "label_create" not in fake_service.recorder
+
+
+def test_create_label_rejects_blank(fake_service):
+    with pytest.raises(ValueError, match="non-empty name"):
+        server._dispatch("create_label", {"account": "a@example.com", "name": "   "})
+    assert "label_create" not in fake_service.recorder
 
 
 def test_search_all_accounts(store, monkeypatch):

@@ -137,6 +137,9 @@ tests/        — pytest; Gmail client is mocked, no live network
   (sync) so this holds.
 - **Label resolution does not create labels.** `resolve_label_ids` matches
   existing ids/names (case-insensitive) and raises listing available names.
+  Creating one is its own tool, `create_label`, on the existing
+  `gmail.modify` scope (no re-consent). It returns the existing id when the
+  name is already taken, so a setup script can re-run safely.
 - **The protocol layer is two adapter functions, and that is on purpose.**
   `list_tools()` and `call_tool()` are plain async functions returning
   `list[Tool]` and `list[TextContent]`. `_on_list_tools` / `_on_call_tool`
