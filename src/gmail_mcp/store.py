@@ -104,11 +104,19 @@ class TokenStore:
             )
 
     def touch(self, email: str) -> None:
-        """Mark an account as just used (updates last_used_at)."""
+        """Mark an account as just used (updates last_used_at).
+
+        Best-effort: if the token store is read-only, the timestamp update
+        is skipped instead of failing the whole tool call.
+        """
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE accounts SET last_used_at = ? WHERE email = ?", (_now(), email)
-            )
+            try:
+                conn.execute(
+                    "UPDATE accounts SET last_used_at = ? WHERE email = ?",
+                    (_now(), email),
+                )
+            except sqlite3.OperationalError:
+                pass  # read-only store; last_used_at update is non-critical
 
     def get(self, email: str) -> Account | None:
         with self._connect() as conn:
