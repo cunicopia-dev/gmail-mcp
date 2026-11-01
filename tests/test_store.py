@@ -1,5 +1,6 @@
 """Token store CRUD against a temporary SQLite database."""
 
+import os
 from __future__ import annotations
 
 import pytest
@@ -68,3 +69,12 @@ def test_remove(store):
     assert store.remove("a@example.com") is True
     assert store.get("a@example.com") is None
     assert store.remove("a@example.com") is False
+
+
+def test_touch_skips_read_only_store(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file modes")
+    path = tmp_path / "tokens.db"
+    TokenStore(path)
+    path.chmod(0o444)
+    TokenStore(path).touch("a@example.com")
