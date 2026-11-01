@@ -1,7 +1,8 @@
 """Token store CRUD against a temporary SQLite database."""
 
-import os
 from __future__ import annotations
+
+import os
 
 import pytest
 
