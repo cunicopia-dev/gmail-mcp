@@ -220,7 +220,8 @@ async def list_tools() -> list[Tool]:
                 "Read a single message: decoded headers, plaintext body "
                 "(HTML stripped if no plaintext part), and attachment metadata. "
                 "Long bodies are truncated by default; pass max_body_chars=0 to "
-                "get the full body." + _UNTRUSTED_NOTICE
+                "get the full body. Pass body_format='html' for the raw HTML "
+                "part, to display in a sandbox." + _UNTRUSTED_NOTICE
             ),
             input_schema={
                 "type": "object",
@@ -233,6 +234,16 @@ async def list_tools() -> list[Tool]:
                         "default": "full",
                     },
                     "max_body_chars": _MAX_BODY_PROP,
+                    "body_format": {
+                        "type": "string",
+                        "enum": ["text", "html"],
+                        "description": (
+                            "'text' (default), or 'html' for the raw HTML part. "
+                            "Falls back to text when there is none; the first "
+                            "line ends in body=html when it is HTML."
+                        ),
+                        "default": "text",
+                    },
                 },
                 "required": ["account", "message_id"],
             },
@@ -746,7 +757,11 @@ def _do_read_message(args: dict) -> str:
         .get(userId="me", id=args["message_id"], format=args.get("format", "full"))
         .execute()
     )
-    return format_parsed_message(parse_message(resource), _resolve_body_cap(args))
+    return format_parsed_message(
+        parse_message(resource),
+        _resolve_body_cap(args),
+        html=args.get("body_format") == "html",
+    )
 
 
 def _do_read_thread(args: dict) -> str:
