@@ -7,6 +7,7 @@ from email import message_from_bytes
 
 import pytest
 
+from gmail_mcp import gmail
 from gmail_mcp.gmail import (
     Attachment,
     ParsedMessage,
@@ -753,3 +754,57 @@ def test_parse_message_captures_label_ids():
     resource = {"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "SPAM"],
                 "payload": {}}
     assert parse_message(resource).label_ids == ["INBOX", "SPAM"]
+
+
+def _b64(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
+def test_extract_html_skips_html_attachments():
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": _b64("hello")}},
+            {"mimeType": "text/html", "body": {"data": _b64("<p>hello</p>")}},
+            {
+                "mimeType": "text/html",
+                "filename": "invoice.html",
+                "body": {"data": _b64("<p>attached</p>")},
+            },
+        ],
+    }
+    assert gmail.extract_html(payload) == "<p>hello</p>"
+
+
+def test_html_format_returns_the_html_part_and_says_so():
+    msg = gmail.parse_message(
+        {
+            "id": "m1",
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": _b64("hello")}},
+                    {"mimeType": "text/html", "body": {"data": _b64("<p>hello</p>")}},
+                ],
+            },
+        }
+    )
+    plain = gmail.format_parsed_message(msg)
+    assert "<p>hello</p>" not in plain and "body=html" not in plain
+    out = gmail.format_parsed_message(msg, html=True)
+    assert "<p>hello</p>" in out
+    assert out.splitlines()[0] == "Message m1 (thread t1) body=html"
+
+
+def test_html_format_falls_back_to_text_without_the_marker():
+    msg = gmail.parse_message(
+        {
+            "id": "m1",
+            "threadId": "t1",
+            "payload": {"mimeType": "text/plain", "body": {"data": _b64("hello")}},
+        }
+    )
+    out = gmail.format_parsed_message(msg, html=True)
+    assert "hello" in out
+    assert "body=html" not in out

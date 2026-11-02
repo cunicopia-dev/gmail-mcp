@@ -134,6 +134,7 @@ class ParsedMessage:
     body: str = ""
     attachments: list[Attachment] = field(default_factory=list)
     label_ids: list[str] = field(default_factory=list)
+    html: str = ""
 
     @property
     def subject(self) -> str:
@@ -265,6 +266,28 @@ def extract_body_and_attachments(
     return body_text.strip(), attachments
 
 
+def extract_html(payload: dict[str, Any]) -> str:
+    """The message's own ``text/html`` parts, unstripped, or ``""`` if it has none.
+
+    Attachments are skipped: an ``.html`` file is not the message body.
+    """
+    parts: list[str] = []
+
+    def walk(part: dict[str, Any]) -> None:
+        body = part.get("body", {}) or {}
+        if (
+            part.get("mimeType") == "text/html"
+            and not part.get("filename")
+            and body.get("data")
+        ):
+            parts.append(_decode_b64url(body["data"]))
+        for sub in part.get("parts", []) or []:
+            walk(sub)
+
+    walk(payload)
+    return "\n".join(p for p in parts if p.strip()).strip()
+
+
 def parse_message(resource: dict[str, Any]) -> ParsedMessage:
     """Turn a full Gmail message resource into a :class:`ParsedMessage`."""
     payload = resource.get("payload", {}) or {}
@@ -274,6 +297,7 @@ def parse_message(resource: dict[str, Any]) -> ParsedMessage:
         thread_id=resource.get("threadId", ""),
         headers=parse_headers(payload),
         body=body,
+        html=extract_html(payload),
         attachments=attachments,
         label_ids=list(resource.get("labelIds", []) or []),
     )
@@ -568,7 +592,9 @@ def _summary_body(msg: dict[str, str]) -> str:
     )
 
 
-def _parsed_body(msg: ParsedMessage, max_body_chars: int | None = None) -> str:
+def _parsed_body(
+    msg: ParsedMessage, max_body_chars: int | None = None, html: bool = False
+) -> str:
     """Untrusted portion of a parsed message (headers + attachments + body)."""
     lines = [
         f"From: {msg.sender}",
@@ -587,7 +613,8 @@ def _parsed_body(msg: ParsedMessage, max_body_chars: int | None = None) -> str:
                 f"  #{i} {att.filename} ({att.mime_type}, {att.size} bytes)"
             )
     lines.append("")
-    lines.append(truncate_body(msg.body or "(no text body)", max_body_chars))
+    body = (html and msg.html) or msg.body or "(no text body)"
+    lines.append(truncate_body(body, max_body_chars))
     return "\n".join(lines)
 
 
@@ -619,16 +646,20 @@ def format_search_results(account: str, results: list[dict[str, str]]) -> str:
 
 
 def format_parsed_message(
-    msg: ParsedMessage, max_body_chars: int | None = None
+    msg: ParsedMessage, max_body_chars: int | None = None, html: bool = False
 ) -> str:
     """Format a fully parsed message (headers + body + attachments).
 
     The id stays outside the untrusted wrapper; everything derived from the
-    message content (headers, attachment filenames, body) is fenced once.
+    message content (headers, attachment filenames, body) is fenced once. With
+    ``html``, the body is the raw HTML part when there is one, and the trusted
+    first line says so. Raw HTML can hold scripts and trackers, so whoever
+    displays it has to sandbox it.
     """
+    marker = " body=html" if html and msg.html else ""
     return (
-        f"Message {msg.id} (thread {msg.thread_id})\n"
-        f"{wrap_untrusted(_parsed_body(msg, max_body_chars))}"
+        f"Message {msg.id} (thread {msg.thread_id}){marker}\n"
+        f"{wrap_untrusted(_parsed_body(msg, max_body_chars, html))}"
     )
 
 
